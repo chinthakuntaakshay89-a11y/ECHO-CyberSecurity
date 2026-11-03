@@ -1,0 +1,376 @@
+import { useState } from 'react';
+import { VaultHeader } from '../components/Vault/VaultHeader';
+import { SiloDataDiagram } from '../components/Vault/SiloDataDiagram';
+import { DedicatedSilosGrid } from '../components/Vault/DedicatedSilosGrid';
+import { PreInvestigationSummary } from '../components/Vault/PreInvestigationSummary';
+import { InvestigationProgressTracker } from '../components/Vault/InvestigationProgressTracker';
+import { StageIngestion } from '../components/Vault/StageIngestion';
+import { StageEntityExtraction } from '../components/Vault/StageEntityExtraction';
+import { CandidateDiscoveryView } from '../components/Vault/CandidateDiscoveryView';
+import { StageCorrelationGraph } from '../components/Vault/StageCorrelationGraph';
+import { StageIncidentTimeline } from '../components/Vault/StageIncidentTimeline';
+import { StageWowMoment } from '../components/Vault/StageWowMoment';
+import { InvestigationReportModal } from '../components/Vault/InvestigationReportModal';
+import { CandidateDiscoveryReportModal } from '../components/Vault/CandidateDiscoveryReportModal';
+import { ResetConfirmationModal } from '../components/Vault/ResetConfirmationModal';
+import { OFFICIAL_DEMO_FILES, SILO_SLOT_CONFIGS } from '../data/vaultDemoData';
+import {
+  UploadedEvidenceFile,
+  InvestigationStage,
+  SiloSlotKey,
+  EvidenceClassification
+} from '../types/vault';
+import { InvestigationCandidate } from '../types/candidates';
+import { analyzeFiles, analyzeDemoFiles } from '../services/investigationService';
+import { useInvestigation } from '../context/InvestigationContext';
+import { AlertCircle, RefreshCw, ArrowLeft } from 'lucide-react';
+
+export const EvidenceVault = () => {
+  const {
+    analysisData,
+    setAnalysisData,
+    selectedCandidate,
+    setSelectedCandidate,
+    clearAnalysisData
+  } = useInvestigation();
+
+  // Mode selection state: default to 'lab' mode (clean empty upload zone)
+  const [investigationMode, setInvestigationMode] = useState<'demo' | 'lab'>('lab');
+
+  // 4 Silo slots initialized to empty (null) - NO pre-input hardcoded files
+  const [siloFiles, setSiloFiles] = useState<Record<SiloSlotKey, UploadedEvidenceFile | null>>({
+    identity: null,
+    network: null,
+    threat_intel: null,
+    endpoint: null
+  });
+
+  const [currentStage, setCurrentStage] = useState<InvestigationStage>('idle');
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+  const [isReportModalOpen, setIsReportModalOpen] = useState<boolean>(false);
+  const [isCandidateReportOpen, setIsCandidateReportOpen] = useState<boolean>(false);
+  const [isResetModalOpen, setIsResetModalOpen] = useState<boolean>(false);
+
+  // Active files list
+  const activeFileList: UploadedEvidenceFile[] = Object.values(siloFiles).filter(Boolean) as UploadedEvidenceFile[];
+
+  const isAllDemoFilesPresent = OFFICIAL_DEMO_FILES.every((demo) =>
+    activeFileList.some((f) => f.name.toLowerCase().includes(demo.name.toLowerCase().replace('.pdf', '')))
+  );
+
+  const handleLoadDemoFiles = () => {
+    setSiloFiles({
+      identity: OFFICIAL_DEMO_FILES[0],
+      network: OFFICIAL_DEMO_FILES[1],
+      threat_intel: OFFICIAL_DEMO_FILES[2],
+      endpoint: OFFICIAL_DEMO_FILES[3]
+    });
+    setInvestigationMode('demo');
+    setCurrentStage('idle');
+    setAnalysisError(null);
+  };
+
+  const handleUploadToSlot = (slotKey: SiloSlotKey, uploadedFiles: File[]) => {
+    if (uploadedFiles.length === 0) return;
+    const file = uploadedFiles[0];
+    const lowerName = file.name.toLowerCase();
+
+    // Custom upload switches mode to 'lab'
+    setInvestigationMode('lab');
+
+    const config = SILO_SLOT_CONFIGS.find((c) => c.key === slotKey);
+    let classification: EvidenceClassification = config?.classification || 'unclassified';
+    let sourceName = config?.sourceName || 'Unclassified Evidence';
+    let warningMismatch: string | undefined = undefined;
+    let suggestedSlotKey: SiloSlotKey | undefined = undefined;
+
+    // Source mismatch detection
+    if (lowerName.includes('net') && slotKey !== 'network') {
+      warningMismatch = `Network telemetry evidence appears to have been uploaded to the ${config?.title} slot. Correlation classification may be affected.`;
+      suggestedSlotKey = 'network';
+    } else if (lowerName.includes('auth') && slotKey !== 'identity') {
+      warningMismatch = `Authentication evidence appears to have been uploaded to the ${config?.title} slot. Correlation classification may be affected.`;
+      suggestedSlotKey = 'identity';
+    } else if ((lowerName.includes('threat') || lowerName.includes('intel')) && slotKey !== 'threat_intel') {
+      warningMismatch = `Threat intelligence feed appears to have been uploaded to the ${config?.title} slot. Correlation classification may be affected.`;
+      suggestedSlotKey = 'threat_intel';
+    } else if ((lowerName.includes('endpoint') || lowerName.includes('system')) && slotKey !== 'endpoint') {
+      warningMismatch = `Endpoint telemetry appears to have been uploaded to the ${config?.title} slot. Correlation classification may be affected.`;
+      suggestedSlotKey = 'endpoint';
+    }
+
+    const processedFile: UploadedEvidenceFile = {
+      id: `file-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      name: file.name,
+      size: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+      status: 'ready',
+      classification,
+      sourceName,
+      siloSlotKey: slotKey,
+      fileObject: file,
+      isOfficialDemoFile: false,
+      warningMismatch,
+      suggestedSlotKey
+    };
+
+    setSiloFiles((prev) => ({
+      ...prev,
+      [slotKey]: processedFile
+    }));
+  };
+
+  const handleRemoveFromSlot = (slotKey: SiloSlotKey) => {
+    setSiloFiles((prev) => ({
+      ...prev,
+      [slotKey]: null
+    }));
+  };
+
+  const handleMoveSlot = (fromSlotKey: SiloSlotKey, targetSlotKey: SiloSlotKey) => {
+    const fileToMove = siloFiles[fromSlotKey];
+    if (!fileToMove) return;
+
+    const targetConfig = SILO_SLOT_CONFIGS.find((c) => c.key === targetSlotKey);
+
+    const updatedFile: UploadedEvidenceFile = {
+      ...fileToMove,
+      siloSlotKey: targetSlotKey,
+      classification: targetConfig?.classification || fileToMove.classification,
+      sourceName: targetConfig?.sourceName || fileToMove.sourceName,
+      warningMismatch: undefined,
+      suggestedSlotKey: undefined
+    };
+
+    setSiloFiles((prev) => ({
+      ...prev,
+      [fromSlotKey]: null,
+      [targetSlotKey]: updatedFile
+    }));
+  };
+
+  const handleConfirmReset = () => {
+    setSiloFiles({
+      identity: null,
+      network: null,
+      threat_intel: null,
+      endpoint: null
+    });
+    setCurrentStage('idle');
+    setAnalysisError(null);
+    clearAnalysisData();
+  };
+
+  const handleStartInvestigation = async () => {
+    if (activeFileList.length === 0) return;
+
+    setAnalysisError(null);
+    setCurrentStage('ingestion');
+
+    try {
+      const result = investigationMode === 'demo'
+        ? await analyzeDemoFiles()
+        : await analyzeFiles(activeFileList.filter((f) => f.fileObject).map((f) => f.fileObject as File));
+
+      console.log('ECHO ANALYZE RESPONSE:', result);
+      console.log('TOTAL RECORDS:', result.total_records);
+      console.log('NORMALIZED EVENTS:', result.normalized_events);
+      console.log('EXTRACTED ENTITIES:', result.extractedEntities);
+
+      setAnalysisData(result);
+      if (!result.success || result.total_records === 0) {
+        setAnalysisError('No usable telemetry records were found. Review the file diagnostics and upload valid telemetry.');
+      }
+    } catch (err: any) {
+      console.error('Investigation analysis API error:', err);
+      setAnalysisError(err.message || 'Failed to connect to ECHO backend analysis API.');
+    }
+  };
+
+  const handleSelectCandidate = (candidate: InvestigationCandidate) => {
+    setSelectedCandidate(candidate);
+    setCurrentStage('correlation');
+  };
+
+  // Previous stage navigation without losing files
+  const getPreviousStage = (stage: InvestigationStage): InvestigationStage => {
+    switch (stage) {
+      case 'reconstruction': return 'timeline';
+      case 'timeline': return 'correlation';
+      case 'correlation': return 'discovery';
+      case 'discovery': return 'extraction';
+      case 'extraction': return 'ingestion';
+      case 'ingestion': return 'idle';
+      default: return 'idle';
+    }
+  };
+
+  return (
+    <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto space-y-6 font-sans">
+      {/* 1. Header with Mode Selector */}
+      <VaultHeader
+        investigationMode={investigationMode}
+        onChangeMode={setInvestigationMode}
+        onLoadDemoFiles={handleLoadDemoFiles}
+        onOpenResetModal={() => setIsResetModalOpen(true)}
+        fileCount={activeFileList.length}
+      />
+
+      {/* Error Notification Banner if Backend API Fails */}
+      {analysisError && (
+        <div className="p-4 bg-red-950/90 border border-red-800 rounded-xl text-xs font-mono text-red-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xl animate-fade-in font-sans">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
+            <div>
+              <strong className="text-red-200 uppercase font-bold block font-mono">ANALYSIS PIPELINE ERROR:</strong>
+              <span>{analysisError}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 font-mono">
+            <button
+              onClick={handleStartInvestigation}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-900 hover:bg-red-800 text-red-100 rounded text-xs font-bold transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Request</span>
+            </button>
+            <button
+              onClick={() => {
+                setAnalysisError(null);
+                setCurrentStage('idle');
+              }}
+              className="px-3 py-1.5 bg-dark-900 hover:bg-dark-800 text-slate-400 rounded text-xs font-bold transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Back to Evidence Uploads / Previous Stage Bar when active */}
+      {currentStage !== 'idle' && (
+        <div className="flex items-center justify-between font-mono text-xs">
+          <button
+            onClick={() => setCurrentStage('idle')}
+            className="flex items-center gap-2 px-3 py-1.5 bg-dark-800 hover:bg-dark-700 text-cyan-400 border border-dark-700 rounded-lg font-bold transition-all cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>← Return to Evidence Uploads ({activeFileList.length} files preserved)</span>
+          </button>
+
+          <button
+            onClick={() => setCurrentStage(getPreviousStage(currentStage))}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-dark-800 hover:bg-dark-700 text-slate-300 border border-dark-700 rounded-lg font-bold transition-all cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Previous Step</span>
+          </button>
+        </div>
+      )}
+
+      {/* Persistent Progress Tracker when active */}
+      {currentStage !== 'idle' && (
+        <InvestigationProgressTracker
+          currentStage={currentStage}
+          onSelectStage={(stage) => setCurrentStage(stage)}
+        />
+      )}
+
+      {/* IDLE INPUT EXPERIENCE */}
+      {currentStage === 'idle' && (
+        <div className="space-y-6">
+          {/* Visual Silos Pathway Diagram */}
+          <SiloDataDiagram siloFiles={siloFiles} />
+
+          {/* 4 Dedicated Upload Cards Grid */}
+          <DedicatedSilosGrid
+            siloFiles={siloFiles}
+            onUploadToSlot={handleUploadToSlot}
+            onRemoveFromSlot={handleRemoveFromSlot}
+            onMoveSlot={handleMoveSlot}
+          />
+
+          {/* Pre-Investigation Checklist & Action Bar */}
+          <PreInvestigationSummary
+            siloFiles={siloFiles}
+            onStartInvestigation={handleStartInvestigation}
+          />
+        </div>
+      )}
+
+      {/* PIPELINE STAGES */}
+      {currentStage === 'ingestion' && (
+        <StageIngestion
+          files={activeFileList}
+          onCompleteStage={() => setCurrentStage('extraction')}
+        />
+      )}
+
+      {currentStage === 'extraction' && (
+        <StageEntityExtraction
+          onCompleteStage={() => setCurrentStage('discovery')}
+          isDemoMode={isAllDemoFilesPresent && investigationMode === 'demo'}
+          totalParsedRecords={analysisData?.total_records}
+          customEntities={analysisData?.extractedEntities}
+        />
+      )}
+
+      {currentStage === 'discovery' && (
+        <CandidateDiscoveryView
+          onSelectCandidate={handleSelectCandidate}
+          onOpenCandidateReport={() => setIsCandidateReportOpen(true)}
+          customCandidates={analysisData?.suspicious_entities}
+          totalEventsAnalyzed={analysisData?.total_records}
+        />
+      )}
+
+      {currentStage === 'correlation' && (
+        <StageCorrelationGraph
+          onCompleteStage={() => setCurrentStage('timeline')}
+          customLinks={analysisData?.correlations}
+        />
+      )}
+
+      {currentStage === 'timeline' && (
+        <StageIncidentTimeline
+          onCompleteStage={() => setCurrentStage('reconstruction')}
+          customTimeline={analysisData?.timeline}
+          normalizedEvents={analysisData?.normalized_events}
+          correlations={analysisData?.correlations}
+        />
+      )}
+
+      {currentStage === 'reconstruction' && (
+        <StageWowMoment
+          onOpenReportModal={() => setIsReportModalOpen(true)}
+        />
+      )}
+
+      {/* Deep Selected Candidate Investigation Report Modal */}
+      <InvestigationReportModal
+        isOpen={isReportModalOpen}
+        onClose={() => setIsReportModalOpen(false)}
+        selectedEntityName={selectedCandidate?.entityName || 'Observed Entity'}
+        analysisData={analysisData}
+      />
+
+      {/* Full Candidate Discovery Report Modal */}
+      <CandidateDiscoveryReportModal
+        isOpen={isCandidateReportOpen}
+        onClose={() => setIsCandidateReportOpen(false)}
+        candidates={analysisData?.suspicious_entities || []}
+        totalEvents={analysisData?.total_records || 0}
+      />
+
+      {/* Reset Confirmation Modal */}
+      <ResetConfirmationModal
+        isOpen={isResetModalOpen}
+        onClose={() => setIsResetModalOpen(false)}
+        onConfirmReset={handleConfirmReset}
+      />
+    </div>
+  );
+};
+
+export default EvidenceVault;
