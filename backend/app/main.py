@@ -9,15 +9,16 @@ app = FastAPI(
 )
 
 # Robust CORS configuration for local Vite development servers across all ports
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):.*",
-    allow_origins=["*"],
+    allow_origins=[
+        "https://YOUR-FRONTEND-DOMAIN.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.include_router(api_investigation_router)
 
 # Direct legacy alias routes
