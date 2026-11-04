@@ -19,7 +19,9 @@ const MainLayout = () => {
   useEffect(() => {
     const checkBackendHealth = async () => {
       try {
-        const response = await fetch('http://localhost:8000/health');
+      const API_URL = import.meta.env.VITE_API_URL || 'https://echo-cyber-security-u2pe.vercel.app';
+
+const response = await fetch(`${API_URL}/health`);
         if (response.ok) {
           setBackendStatus('ONLINE');
         } else {
