@@ -1,17 +1,36 @@
+# Node
 node_modules/
 frontend/node_modules/
 frontend/dist/
 
-venv/
-backend/venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+venv/
+.venv/
+.env/
+.python-version
 
+# Environment variables and secrets
 .env
 .env.*
 !.env.example
 
-*.log
+# IDE and editor
 .vscode/
 .idea/
 
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Local uploads and temporary files
+*.tmp
